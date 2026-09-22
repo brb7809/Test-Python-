@@ -1,0 +1,92 @@
+import os
+import re
+import pandas as pd
+import pdfplumber
+from datetime import datetime
+
+# ==========================================
+# 1. CONFIGURACIÓN
+# ==========================================
+nombre_archivo = "1000138123.pdf" 
+# Extraemos el número del archivo para la columna BKG NO.
+bkg_no = nombre_archivo.upper().replace('.PDF', '')
+
+datos = []
+
+# ==========================================
+# 2. EXTRACCIÓN DE DATOS DEL PDF
+# ==========================================
+print(f"Leyendo el archivo {nombre_archivo}...")
+with pdfplumber.open(nombre_archivo) as pdf:
+    for page in pdf.pages:
+        # Extraemos el texto de la página manteniendo la estructura visual
+        texto = page.extract_text()
+        if not texto:
+            continue
+            
+        lineas = texto.split('\n')
+        fecha_actual = None
+        
+        for linea in lineas:
+            # Buscar líneas que inician con fecha (ej: "10/09/2026 - quinta-feira")
+            match_fecha = re.match(r"^(\d{2}/\d{2}/\d{4})\s+-", linea)
+            if match_fecha:
+                # Convertimos la fecha de texto (DD/MM/YYYY) a un objeto de fecha real
+                fecha_actual = datetime.strptime(match_fecha.group(1), "%d/%m/%Y")
+            
+            # Buscar la línea de "Total do dia:" y capturar la Cantidad (ADM) y el Bruto
+            # La expresión regular busca la frase, luego uno o más espacios, captura números (ADM),
+            # más espacios, y captura el monto con comas y puntos (Bruto)
+            match_total = re.search(r"Total do\s+dia:\s+(\d+)\s+([\d\.,]+)", linea)
+            
+            if match_total and fecha_actual:
+                adm = int(match_total.group(1))
+                bruto_str = match_total.group(2)
+                
+                # Convertir formato moneda de Brasil (1.000,50) a formato estándar/sistema (1000.50)
+                bruto_str = bruto_str.replace('.', '').replace(',', '.')
+                bruto = float(bruto_str)
+                
+                datos.append({
+                    'PLAYDATE START DATE': fecha_actual,
+                    'ADM': adm,
+                    'Gross': bruto
+                })
+
+# ==========================================
+# 3. PROCESAMIENTO Y FORMATO (PANDAS)
+# ==========================================
+if datos:
+    df = pd.DataFrame(datos)
+    
+    # Rellenar los días faltantes con 0 (ya que el PDF salta del 13 al 16)
+    df.set_index('PLAYDATE START DATE', inplace=True)
+    rango_completo = pd.date_range(start=df.index.min(), end=df.index.max())
+    df = df.reindex(rango_completo, fill_value=0).reset_index()
+    df.rename(columns={'index': 'PLAYDATE START DATE'}, inplace=True)
+    
+    # Formatear la fecha para que se vea como en tu captura (Mes/Día/Año)
+    df['PLAYDATE START DATE'] = df['PLAYDATE START DATE'].dt.strftime('%m/%d/%Y')
+    
+    # Añadir las columnas adicionales requeridas
+    df.insert(0, 'BKG NO.', bkg_no)
+    df.insert(3, 'FREE', '') # Columna vacía
+    
+    # Función para quitar los decimales solo si el monto es exacto (.00)
+    def formatear_moneda(valor):
+        if valor == 0:
+            return 0
+        if valor % 1 == 0:
+            return int(valor) # Al convertir a int, Excel no mostrará decimales
+        return valor
+        
+    df['Gross'] = df['Gross'].apply(formatear_moneda)
+    
+    # ==========================================
+# 4. EXPORTAR A EXCEL
+# ==========================================
+    archivo_salida = f"{bkg_no}.xlsx"
+    df.to_excel(archivo_salida, index=False)
+    print(f"¡Éxito! Archivo generado: {archivo_salida}")
+else:
+    print("No se encontraron datos. Verifica el nombre o la estructura del PDF.")
